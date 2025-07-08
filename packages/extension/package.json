@@ -1,0 +1,107 @@
+{
+  "name": "devshare",
+  "displayName": "DevShare",
+  "description": "Secure, offline project sharing for VS Code",
+  "version": "0.1.0",
+  "publisher": "devshare",
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:devshare"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "views": {
+      "explorer": [
+        {
+          "id": "devshare",
+          "name": "DevShare",
+          "when": "true"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "devshare.ping",
+        "title": "Ping Daemon",
+        "category": "DevShare"
+      },
+      {
+        "command": "devshare.shareProject",
+        "title": "Share Project",
+        "category": "DevShare"
+      },
+      {
+        "command": "devshare.importProject",
+        "title": "Import Project",
+        "category": "DevShare"
+      },
+      {
+        "command": "devshare.runProject",
+        "title": "Run Project",
+        "category": "DevShare"
+      },
+      {
+        "command": "devshare.stopProject",
+        "title": "Stop Project",
+        "category": "DevShare"
+      },
+      {
+        "command": "devshare.refreshProjects",
+        "title": "Refresh",
+        "icon": "$(refresh)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "devshare.refreshProjects",
+          "when": "view == devshare",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "devshare.runProject",
+          "when": "view == devshare && viewItem == project-stopped",
+          "group": "inline"
+        },
+        {
+          "command": "devshare.stopProject",
+          "when": "view == devshare && viewItem == project-running",
+          "group": "inline"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "build": "webpack --mode production",
+    "dev": "webpack --mode development --watch",
+    "package": "vsce package",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "@devshare/proto": "workspace:*",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.74.0",
+    "@types/ws": "^8.5.10",
+    "@types/node": "^20.0.0",
+    "@vscode/vsce": "^2.22.0",
+    "typescript": "^5.0.0",
+    "webpack": "^5.89.0",
+    "webpack-cli": "^5.1.4",
+    "ts-loader": "^9.5.0",
+    "vitest": "^1.0.0"
+  },
+  "files": [
+    "dist"
+  ]
+}
