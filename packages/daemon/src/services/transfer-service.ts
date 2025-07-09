@@ -488,16 +488,28 @@ export class TransferService {
     const chunkEnd = Math.min(chunkStart + this.config.chunkSize - 1, bundle.size - 1);
     const chunkSize = chunkEnd - chunkStart + 1;
     
+    // Read chunk data to calculate checksum
+    const chunkData = Buffer.alloc(chunkSize);
+    const fileStream = createReadStream(bundle.bundlePath, { start: chunkStart, end: chunkEnd });
+    
+    let bytesRead = 0;
+    for await (const chunk of fileStream) {
+      chunk.copy(chunkData, bytesRead);
+      bytesRead += chunk.length;
+    }
+    
+    // Calculate chunk checksum
+    const chunkChecksum = createHash('sha256').update(chunkData).digest('hex');
+    
     res.writeHead(200, {
       'Content-Type': 'application/octet-stream',
       'Content-Length': chunkSize.toString(),
       'Content-Range': `bytes ${chunkStart}-${chunkEnd}/${bundle.size}`,
       'X-Chunk-Index': chunkIndex.toString(),
-      'X-Chunk-Checksum': '' // TODO: Calculate chunk checksum
+      'X-Chunk-Checksum': chunkChecksum
     });
     
-    const fileStream = createReadStream(bundle.bundlePath, { start: chunkStart, end: chunkEnd });
-    fileStream.pipe(res);
+    res.end(chunkData);
   }
 
   private async sendEntireBundle(res: ServerResponse, bundle: BundleInfo): Promise<void> {
@@ -513,7 +525,7 @@ export class TransferService {
   }
 
   private async downloadBundle(peer: PeerInfo, bundleId: string, token: string, transfer: TransferState): Promise<void> {
-    logger.info(`Starting download of bundle ${bundleId} from ${peer.address}:${peer.port}`);
+    logger.info(`Starting chunked download of bundle ${bundleId} from ${peer.address}:${peer.port}`);
     
     try {
       // Ensure temp directory exists
@@ -522,39 +534,40 @@ export class TransferService {
       transfer.status = 'transferring';
       this.notifyTransferProgress(transfer);
       
-      // Download bundle (for now, download entire bundle - chunking can be added later)
-      const response = await fetch(`http://${peer.address}:${peer.port}/api/transfer/${token}`);
-      
-      if (!response.ok) {
-        throw new Error(`Download failed: ${response.status} ${response.statusText}`);
-      }
-      
-      const totalSize = parseInt(response.headers.get('content-length') || '0');
-      transfer.totalBytes = totalSize;
-      
+      // Download chunks in parallel for better performance
       const writeStream = createWriteStream(transfer.tempPath!);
-      const reader = response.body?.getReader();
+      const downloadedChunks = new Map<number, Buffer>();
+      const maxConcurrentChunks = 3; // Download up to 3 chunks simultaneously
       
-      if (!reader) {
-        throw new Error('Failed to get response reader');
+      // Download chunks with concurrency control
+      const downloadPromises: Promise<void>[] = [];
+      
+      for (let chunkIndex = 0; chunkIndex < transfer.totalChunks; chunkIndex++) {
+        // Limit concurrent downloads
+        if (downloadPromises.length >= maxConcurrentChunks) {
+          await Promise.race(downloadPromises);
+          // Remove completed promises
+          for (let i = downloadPromises.length - 1; i >= 0; i--) {
+            if (downloadPromises[i] === undefined) {
+              downloadPromises.splice(i, 1);
+            }
+          }
+        }
+        
+        const promise = this.downloadChunk(peer, token, chunkIndex, transfer, downloadedChunks);
+        downloadPromises.push(promise);
       }
       
-      let downloadedBytes = 0;
+      // Wait for all chunks to complete
+      await Promise.all(downloadPromises);
       
-      while (true) {
-        const { done, value } = await reader.read();
-        
-        if (done) break;
-        
-        writeStream.write(value);
-        downloadedBytes += value.length;
-        transfer.transferredBytes = downloadedBytes;
-        
-        // Update progress every 1MB or 5%
-        if (downloadedBytes % (1024 * 1024) === 0 || 
-            downloadedBytes / totalSize >= (transfer.completedChunks.size + 1) * 0.05) {
-          this.notifyTransferProgress(transfer);
+      // Write chunks in order to the file
+      for (let i = 0; i < transfer.totalChunks; i++) {
+        const chunkData = downloadedChunks.get(i);
+        if (!chunkData) {
+          throw new Error(`Missing chunk ${i}`);
         }
+        writeStream.write(chunkData);
       }
       
       writeStream.end();
@@ -562,13 +575,67 @@ export class TransferService {
       transfer.status = 'completed';
       this.notifyTransferProgress(transfer);
       
-      logger.info(`Bundle ${bundleId} downloaded successfully`);
+      logger.info(`Bundle ${bundleId} downloaded successfully using ${transfer.totalChunks} chunks`);
       
     } catch (error) {
       transfer.status = 'failed';
       transfer.error = error instanceof Error ? error.message : 'Unknown error';
       this.notifyTransferProgress(transfer);
       throw error;
+    }
+  }
+
+  private async downloadChunk(
+    peer: PeerInfo, 
+    token: string, 
+    chunkIndex: number, 
+    transfer: TransferState,
+    downloadedChunks: Map<number, Buffer>
+  ): Promise<void> {
+    const maxRetries = 3;
+    let attempt = 0;
+    
+    while (attempt < maxRetries) {
+      try {
+        const response = await fetch(`http://${peer.address}:${peer.port}/api/transfer/${token}/${chunkIndex}`);
+        
+        if (!response.ok) {
+          throw new Error(`Chunk ${chunkIndex} download failed: ${response.status}`);
+        }
+        
+        const chunkData = Buffer.from(await response.arrayBuffer());
+        
+        // Verify chunk checksum if provided
+        const expectedChecksum = response.headers.get('X-Chunk-Checksum');
+        if (expectedChecksum) {
+          const actualChecksum = createHash('sha256').update(chunkData).digest('hex');
+          if (actualChecksum !== expectedChecksum) {
+            throw new Error(`Chunk ${chunkIndex} checksum mismatch`);
+          }
+        }
+        
+        downloadedChunks.set(chunkIndex, chunkData);
+        transfer.completedChunks.add(chunkIndex);
+        transfer.transferredBytes += chunkData.length;
+        
+        // Update progress
+        this.notifyTransferProgress(transfer);
+        
+        logger.debug(`Downloaded chunk ${chunkIndex}/${transfer.totalChunks} (${chunkData.length} bytes)`);
+        return;
+        
+      } catch (error) {
+        attempt++;
+        if (attempt >= maxRetries) {
+          logger.error(`Failed to download chunk ${chunkIndex} after ${maxRetries} attempts: ${error}`);
+          throw error;
+        }
+        
+        // Exponential backoff
+        const delay = Math.pow(2, attempt) * 1000;
+        await new Promise(resolve => setTimeout(resolve, delay));
+        logger.warn(`Retrying chunk ${chunkIndex} download (attempt ${attempt + 1}/${maxRetries})`);
+      }
     }
   }
 

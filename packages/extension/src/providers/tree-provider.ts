@@ -2,9 +2,13 @@ import * as vscode from 'vscode';
 import { Project, Peer, TransferProgress } from '@devshare/proto';
 import { DevShareClient } from '../services/devshare-client';
 
-export class DevShareTreeProvider implements vscode.TreeDataProvider<DevShareTreeItem> {
+export class DevShareTreeProvider implements vscode.TreeDataProvider<DevShareTreeItem>, vscode.TreeDragAndDropController<DevShareTreeItem> {
   private _onDidChangeTreeData: vscode.EventEmitter<DevShareTreeItem | undefined | null | void> = new vscode.EventEmitter<DevShareTreeItem | undefined | null | void>();
   readonly onDidChangeTreeData: vscode.Event<DevShareTreeItem | undefined | null | void> = this._onDidChangeTreeData.event;
+  
+  // Drag and drop support
+  readonly dropMimeTypes = ['application/vnd.code.tree.devshare', 'text/uri-list'];
+  readonly dragMimeTypes = ['application/vnd.code.tree.devshare'];
   
   private activeTransfers = new Map<string, TransferProgress>();
   private refreshInterval: NodeJS.Timeout | undefined;
@@ -205,6 +209,154 @@ export class DevShareTreeProvider implements vscode.TreeDataProvider<DevShareTre
     }
 
     return [];
+  }
+
+  // Drag and Drop Implementation
+  async handleDrag(source: DevShareTreeItem[], treeDataTransfer: vscode.DataTransfer, token: vscode.CancellationToken): Promise<void> {
+    // For now, we'll support dragging projects to share them
+    const projectItems = source.filter(item => item.project);
+    
+    if (projectItems.length > 0) {
+      const projectData = projectItems.map(item => ({
+        id: item.project!.id,
+        name: item.project!.name,
+        path: item.project!.path
+      }));
+      
+      treeDataTransfer.set('application/vnd.code.tree.devshare', new vscode.DataTransferItem(JSON.stringify(projectData)));
+    }
+  }
+
+  async handleDrop(target: DevShareTreeItem | undefined, dataTransfer: vscode.DataTransfer, token: vscode.CancellationToken): Promise<void> {
+    // Handle dropping files/folders from VS Code explorer
+    const uriListData = dataTransfer.get('text/uri-list');
+    if (uriListData) {
+      const uriList = uriListData.value as string;
+      const uris = uriList.split('\n').filter(line => line.trim().length > 0).map(line => vscode.Uri.parse(line.trim()));
+      
+      if (uris.length > 0) {
+        await this.handleFolderDrop(uris, target);
+        return;
+      }
+    }
+
+    // Handle dropping DevShare projects onto peers
+    const devshareData = dataTransfer.get('application/vnd.code.tree.devshare');
+    if (devshareData && target?.peer) {
+      const projectData = JSON.parse(devshareData.value as string);
+      await this.handleProjectDropOnPeer(projectData, target.peer);
+      return;
+    }
+  }
+
+  private async handleFolderDrop(uris: vscode.Uri[], target?: DevShareTreeItem): Promise<void> {
+    // Filter to only directories
+    const folders = [];
+    for (const uri of uris) {
+      try {
+        const stat = await vscode.workspace.fs.stat(uri);
+        if (stat.type === vscode.FileType.Directory) {
+          folders.push(uri);
+        }
+      } catch (error) {
+        // Skip files that can't be accessed
+        continue;
+      }
+    }
+
+    if (folders.length === 0) {
+      vscode.window.showWarningMessage('Please drop folders, not individual files.');
+      return;
+    }
+
+    // If dropped on a peer, share directly
+    if (target?.peer) {
+      for (const folder of folders) {
+        await this.shareProjectWithPeer(folder.fsPath, target.peer);
+      }
+    } else {
+      // Show peer selection dialog
+      await this.showPeerSelectionForFolders(folders);
+    }
+  }
+
+  private async handleProjectDropOnPeer(projectData: any[], peer: Peer): Promise<void> {
+    for (const project of projectData) {
+      try {
+        // Request the project bundle from the daemon and share with peer
+        await vscode.window.withProgress({
+          location: vscode.ProgressLocation.Notification,
+          title: `Sharing ${project.name} with ${peer.name}`,
+          cancellable: true
+        }, async (progress, token) => {
+          // This would trigger the sharing workflow
+          await vscode.commands.executeCommand('devshare.shareProjectWithPeer', project.path, peer.id);
+        });
+      } catch (error) {
+        vscode.window.showErrorMessage(`Failed to share ${project.name}: ${error}`);
+      }
+    }
+  }
+
+  private async shareProjectWithPeer(projectPath: string, peer: Peer): Promise<void> {
+    try {
+      await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: `Sharing project with ${peer.name}`,
+        cancellable: true
+      }, async (progress, token) => {
+        // Create and share bundle
+        const result = await this.client.share({
+          projectPath,
+          recipients: [peer.id],
+          name: require('path').basename(projectPath),
+          version: '1.0.0'
+        });
+
+        if (result.bundleId) {
+          // Track the transfer
+          this.addTransfer(result.transferId);
+          vscode.window.showInformationMessage(`Started sharing project with ${peer.name}. Transfer ID: ${result.transferId}`);
+        } else {
+          throw new Error('Failed to create bundle');
+        }
+      });
+    } catch (error) {
+      vscode.window.showErrorMessage(`Failed to share project: ${error}`);
+    }
+  }
+
+  private async showPeerSelectionForFolders(folders: vscode.Uri[]): Promise<void> {
+    try {
+      // Get available peers
+      const peers = await this.client.discoverPeers();
+      
+      if (peers.length === 0) {
+        vscode.window.showWarningMessage('No peers found. Make sure other DevShare instances are running on your network.');
+        return;
+      }
+
+      // Show peer selection
+      const peerItems = peers.map(peer => ({
+        label: peer.name,
+        description: peer.online ? 'Online' : 'Offline',
+        detail: `${peer.address} - Last seen: ${peer.lastSeen}`,
+        peer
+      }));
+
+      const selectedPeer = await vscode.window.showQuickPick(peerItems, {
+        placeHolder: 'Select a peer to share with',
+        title: `Share ${folders.length} folder(s)`
+      });
+
+      if (selectedPeer) {
+        for (const folder of folders) {
+          await this.shareProjectWithPeer(folder.fsPath, selectedPeer.peer);
+        }
+      }
+    } catch (error) {
+      vscode.window.showErrorMessage(`Failed to discover peers: ${error}`);
+    }
   }
 }
 
