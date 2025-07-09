@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'crypto';
+import { createHash, randomBytes, pbkdf2Sync, createCipher, createDecipher } from 'crypto';
 import { Logger } from '../utils/logger';
 
 const logger = new Logger('crypto-service');
@@ -251,6 +251,63 @@ export class CryptoService {
     } catch (error) {
       logger.error(`Failed to verify signature: ${error}`);
       return false;
+    }
+  }
+
+  async deriveKey(password: string, salt: string): Promise<Buffer> {
+    try {
+      // Try native implementation first
+      try {
+        const native = require('@devshare/native');
+        return native.deriveKey(password, salt);
+      } catch (error) {
+        // Fallback to Node.js PBKDF2
+        logger.warn('Using Node.js PBKDF2 for key derivation');
+        return pbkdf2Sync(password, salt, 100000, 32, 'sha256');
+      }
+    } catch (error) {
+      logger.error(`Failed to derive key: ${error}`);
+      throw error;
+    }
+  }
+
+  encrypt(data: string, key: Buffer): string {
+    try {
+      // Try native implementation first
+      try {
+        const native = require('@devshare/native');
+        return native.encryptAesGcm(Buffer.from(data), key).toString('base64');
+      } catch (error) {
+        // Fallback to Node.js cipher
+        logger.warn('Using Node.js cipher for encryption');
+        const cipher = createCipher('aes-256-cbc', key);
+        let encrypted = cipher.update(data, 'utf8', 'hex');
+        encrypted += cipher.final('hex');
+        return encrypted;
+      }
+    } catch (error) {
+      logger.error(`Failed to encrypt data: ${error}`);
+      throw error;
+    }
+  }
+
+  decrypt(encryptedData: string, key: Buffer): string {
+    try {
+      // Try native implementation first
+      try {
+        const native = require('@devshare/native');
+        return native.decryptAesGcm(Buffer.from(encryptedData, 'base64'), key).toString('utf8');
+      } catch (error) {
+        // Fallback to Node.js decipher
+        logger.warn('Using Node.js decipher for decryption');
+        const decipher = createDecipher('aes-256-cbc', key);
+        let decrypted = decipher.update(encryptedData, 'hex', 'utf8');
+        decrypted += decipher.final('utf8');
+        return decrypted;
+      }
+    } catch (error) {
+      logger.error(`Failed to decrypt data: ${error}`);
+      throw error;
     }
   }
 }

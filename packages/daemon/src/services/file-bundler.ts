@@ -4,6 +4,7 @@ import { join, relative, dirname } from 'path';
 import { createHash } from 'crypto';
 import { createGzip } from 'zlib';
 import { pipeline } from 'stream/promises';
+import { Transform } from 'stream';
 import { ProjectManifest } from '@devshare/proto';
 import { Logger } from '../utils/logger';
 
@@ -48,6 +49,51 @@ export class FileBundler {
     'tmp',
     'temp'
   ];
+
+  private createCompressionStream(): Transform {
+    try {
+      // Try to use native zstd compression
+      const native = require('@devshare/native');
+      
+      return new Transform({
+        transform(chunk: Buffer, encoding, callback) {
+          try {
+            const compressed = native.zstdCompress(chunk);
+            callback(null, compressed);
+          } catch (error) {
+            callback(error instanceof Error ? error : new Error(String(error)));
+          }
+        }
+      });
+    } catch (error) {
+      // Fallback to gzip compression
+      logger.warn('Native zstd compression not available, using gzip fallback');
+      return createGzip();
+    }
+  }
+
+  private createDecompressionStream(): Transform {
+    try {
+      // Try to use native zstd decompression
+      const native = require('@devshare/native');
+      
+      return new Transform({
+        transform(chunk: Buffer, encoding, callback) {
+          try {
+            const decompressed = native.zstdDecompress(chunk);
+            callback(null, decompressed);
+          } catch (error) {
+            callback(error instanceof Error ? error : new Error(String(error)));
+          }
+        }
+      });
+    } catch (error) {
+      // Fallback to gzip decompression
+      logger.warn('Native zstd decompression not available, using gzip fallback');
+      const { createGunzip } = require('zlib');
+      return createGunzip();
+    }
+  }
 
   async createBundle(options: BundleOptions): Promise<BundleResult> {
     logger.info(`Creating bundle for project at ${options.projectPath}`);
@@ -209,7 +255,7 @@ export class FileBundler {
     // 3. For each file: path length, path, content length, content
     
     const writeStream = createWriteStream(outputPath);
-    const gzipStream = createGzip();
+    const compressionStream = this.createCompressionStream();
     const hash = createHash('sha256');
     
     let totalSize = 0;
@@ -220,13 +266,13 @@ export class FileBundler {
     const manifestLengthBuffer = Buffer.alloc(4);
     manifestLengthBuffer.writeUInt32BE(manifestBuffer.length, 0);
     
-    await this.writeToStream(gzipStream, manifestLengthBuffer);
-    await this.writeToStream(gzipStream, manifestBuffer);
+    await this.writeToStream(compressionStream, manifestLengthBuffer);
+    await this.writeToStream(compressionStream, manifestBuffer);
     
     // Write file count
     const fileCountBuffer = Buffer.alloc(4);
     fileCountBuffer.writeUInt32BE(files.length, 0);
-    await this.writeToStream(gzipStream, fileCountBuffer);
+    await this.writeToStream(compressionStream, fileCountBuffer);
     
     // Write files
     for (const filePath of files) {
@@ -238,27 +284,27 @@ export class FileBundler {
       const pathLengthBuffer = Buffer.alloc(4);
       pathLengthBuffer.writeUInt32BE(pathBuffer.length, 0);
       
-      await this.writeToStream(gzipStream, pathLengthBuffer);
-      await this.writeToStream(gzipStream, pathBuffer);
+      await this.writeToStream(compressionStream, pathLengthBuffer);
+      await this.writeToStream(compressionStream, pathBuffer);
       
       // Write file size
       const fileSizeBuffer = Buffer.alloc(8);
       fileSizeBuffer.writeBigUInt64BE(BigInt(fileStats.size), 0);
-      await this.writeToStream(gzipStream, fileSizeBuffer);
+      await this.writeToStream(compressionStream, fileSizeBuffer);
       
       // Write file content
       const fileStream = createReadStream(fullPath);
       for await (const chunk of fileStream) {
-        await this.writeToStream(gzipStream, chunk);
+        await this.writeToStream(compressionStream, chunk);
       }
       
       totalSize += fileStats.size;
     }
     
     // Finalize compression and get final size
-    gzipStream.end();
+    compressionStream.end();
     
-    await pipeline(gzipStream, hash, writeStream);
+    await pipeline(compressionStream, hash, writeStream);
     
     const finalStats = await stat(outputPath);
     const checksum = hash.digest('hex');
