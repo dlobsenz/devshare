@@ -41,6 +41,12 @@ export interface DevShareAPI {
   // Status queries
   getProjectStatus(params: { projectId: string }): Promise<ProjectStatus>;
   listPeers(): Promise<Peer[]>;
+  
+  // Transfer management
+  getTransferProgress(params: { transferId: string }): Promise<TransferProgress | null>;
+  cancelTransfer(params: { transferId: string }): Promise<{ cancelled: boolean }>;
+  addManualPeer(params: { address: string; port: number; name?: string }): Promise<{ added: boolean }>;
+  discoverPeers(): Promise<Peer[]>;
 }
 
 // Project types

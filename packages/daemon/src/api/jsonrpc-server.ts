@@ -16,11 +16,12 @@ export class JsonRpcServer {
       const request: JsonRpcRequest = JSON.parse(message);
       
       if (!this.isValidRequest(request)) {
-        return this.createErrorResponse(
+        const errorResponse = this.createErrorResponse(
           DevShareErrorCode.INVALID_REQUEST,
           'Invalid JSON-RPC request',
-          request.id || null
+          (request as any).id || null
         );
+        return JSON.stringify(errorResponse);
       }
 
       logger.debug(`Handling method: ${request.method}`, request.params);
@@ -30,11 +31,12 @@ export class JsonRpcServer {
 
     } catch (error) {
       logger.error('Error parsing JSON-RPC message:', error);
-      return this.createErrorResponse(
+      const errorResponse = this.createErrorResponse(
         DevShareErrorCode.INVALID_REQUEST,
         'Invalid JSON',
         null
       );
+      return JSON.stringify(errorResponse);
     }
   }
 
@@ -99,6 +101,31 @@ export class JsonRpcServer {
           result = await this.devShareService.listPeers();
           break;
 
+        case 'getTransferProgress':
+          if (!request.params) {
+            throw new Error('Missing parameters for getTransferProgress method');
+          }
+          result = await this.devShareService.getTransferProgress(request.params);
+          break;
+
+        case 'cancelTransfer':
+          if (!request.params) {
+            throw new Error('Missing parameters for cancelTransfer method');
+          }
+          result = await this.devShareService.cancelTransfer(request.params);
+          break;
+
+        case 'addManualPeer':
+          if (!request.params) {
+            throw new Error('Missing parameters for addManualPeer method');
+          }
+          result = await this.devShareService.addManualPeer(request.params);
+          break;
+
+        case 'discoverPeers':
+          result = await this.devShareService.discoverPeers();
+          break;
+
         default:
           return this.createErrorResponse(
             DevShareErrorCode.METHOD_NOT_FOUND,
@@ -143,8 +170,8 @@ export class JsonRpcServer {
     }
   }
 
-  private createErrorResponse(code: number, message: string, id: string | number | null): string {
-    const response: JsonRpcResponse = {
+  private createErrorResponse(code: number, message: string, id: string | number | null): JsonRpcResponse {
+    return {
       jsonrpc: '2.0',
       error: {
         code,
@@ -153,7 +180,5 @@ export class JsonRpcServer {
       },
       id
     };
-
-    return JSON.stringify(response);
   }
 }

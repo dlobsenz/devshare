@@ -204,4 +204,53 @@ export class CryptoService {
   generateSecureToken(): string {
     return randomBytes(32).toString('hex');
   }
+
+  async signMessage(message: string): Promise<SignatureResult> {
+    if (!this.keyPair) {
+      throw new Error('Crypto service not initialized');
+    }
+
+    try {
+      let signature: string;
+
+      // Try native implementation first
+      try {
+        const native = require('@devshare/native');
+        signature = await native.signData(message, this.keyPair.privateKey);
+      } catch (error) {
+        // Fallback to JavaScript implementation
+        signature = this.signDataFallback(message, this.keyPair.privateKey);
+      }
+
+      return {
+        signature,
+        publicKey: this.keyPair.publicKey
+      };
+
+    } catch (error) {
+      logger.error(`Failed to sign message: ${error}`);
+      throw error;
+    }
+  }
+
+  async verifySignature(message: string, signature: string, publicKey: string): Promise<boolean> {
+    try {
+      let isValid: boolean;
+
+      // Try native verification first
+      try {
+        const native = require('@devshare/native');
+        isValid = await native.verifySignature(message, signature, publicKey);
+      } catch (error) {
+        // Fallback to JavaScript verification
+        isValid = this.verifySignatureFallback(message, signature, publicKey);
+      }
+
+      return isValid;
+
+    } catch (error) {
+      logger.error(`Failed to verify signature: ${error}`);
+      return false;
+    }
+  }
 }

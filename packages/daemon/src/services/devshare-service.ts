@@ -9,7 +9,8 @@ import {
   StopParams, 
   StopResult, 
   ProjectStatus, 
-  Peer 
+  Peer,
+  TransferProgress 
 } from '@devshare/proto';
 import { MockDatabase } from '../database/mock-database';
 import { ProjectScanner } from './project-scanner';
@@ -17,10 +18,12 @@ import { FileBundler } from './file-bundler';
 import { BundleExtractor } from './bundle-extractor';
 import { ProjectExecutor } from './project-executor';
 import { CryptoService } from './crypto-service';
+import { TransferService } from './transfer-service';
 import { Logger } from '../utils/logger';
 import { join } from 'path';
 import { tmpdir, homedir } from 'os';
 import { readFile } from 'fs/promises';
+import { existsSync } from 'fs';
 
 const logger = new Logger('devshare-service');
 
@@ -31,6 +34,7 @@ export class DevShareService {
   private bundleExtractor: BundleExtractor;
   private projectExecutor: ProjectExecutor;
   private cryptoService: CryptoService;
+  private transferService: TransferService;
   private startTime: number;
 
   constructor(database: MockDatabase) {
@@ -40,17 +44,31 @@ export class DevShareService {
     this.bundleExtractor = new BundleExtractor();
     this.projectExecutor = new ProjectExecutor();
     this.cryptoService = new CryptoService();
+    this.transferService = new TransferService();
     this.startTime = Date.now();
   }
 
   async initialize(): Promise<void> {
     logger.info('Initializing DevShare service...');
-    // TODO: Initialize crypto keys, peer discovery, etc.
+    
+    // Initialize transfer service
+    await this.transferService.initialize();
+    
+    // Set up transfer progress callbacks
+    this.transferService.onTransferProgressChanged((progress: TransferProgress) => {
+      logger.debug(`Transfer progress: ${progress.transferId} - ${progress.status} (${progress.completedChunks}/${progress.totalChunks})`);
+      // TODO: Forward to WebSocket clients
+    });
+    
     logger.info('DevShare service initialized');
   }
 
   async shutdown(): Promise<void> {
     logger.info('Shutting down DevShare service...');
+    
+    // Shutdown transfer service
+    await this.transferService.shutdown();
+    
     // TODO: Stop running processes, cleanup resources
     logger.info('DevShare service shutdown complete');
   }
@@ -104,8 +122,8 @@ export class DevShareService {
       
       logger.info(`Bundle signed with key: ${signature.publicKey.substring(0, 8)}...`);
       
-      // TODO: Implement remaining sharing logic
-      // 6. Start transfer to recipients
+      // 6. Announce bundle for sharing via transfer service
+      await this.transferService.announceBundle(bundleId, bundlePath, manifest);
       
       await this.database.logAuditEvent('project_shared', undefined, undefined, {
         bundleId,
@@ -260,7 +278,49 @@ export class DevShareService {
   }
 
   async listPeers(): Promise<Peer[]> {
-    // Return mock peers for bootstrap testing
-    return this.database.getPeers();
+    // Get peers from transfer service
+    const transferPeers = await this.transferService.discoverPeers();
+    
+    // Convert to protocol format
+    const peers: Peer[] = transferPeers.map(peer => ({
+      id: peer.id,
+      name: peer.name,
+      publicKey: peer.publicKey,
+      lastSeen: peer.lastSeen.toISOString(),
+      online: peer.online,
+      address: peer.address
+    }));
+    
+    return peers;
+  }
+
+  // Transfer management methods
+  async getTransferProgress(params: { transferId: string }): Promise<TransferProgress | null> {
+    return await this.transferService.getTransferProgress(params.transferId);
+  }
+
+  async cancelTransfer(params: { transferId: string }): Promise<{ cancelled: boolean }> {
+    try {
+      await this.transferService.cancelTransfer(params.transferId);
+      return { cancelled: true };
+    } catch (error) {
+      logger.error(`Failed to cancel transfer ${params.transferId}: ${error}`);
+      return { cancelled: false };
+    }
+  }
+
+  async addManualPeer(params: { address: string; port: number; name?: string }): Promise<{ added: boolean }> {
+    try {
+      await this.transferService.addManualPeer(params.address, params.port, params.name);
+      return { added: true };
+    } catch (error) {
+      logger.error(`Failed to add manual peer ${params.address}:${params.port}: ${error}`);
+      return { added: false };
+    }
+  }
+
+  async discoverPeers(): Promise<Peer[]> {
+    // Same as listPeers for now, but could be enhanced with active discovery
+    return await this.listPeers();
   }
 }

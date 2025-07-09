@@ -11,7 +11,8 @@ import {
   StopParams,
   StopResult,
   ProjectStatus,
-  Peer
+  Peer,
+  TransferProgress
 } from '@devshare/proto';
 
 const WEBSOCKET_DEFAULT_PORT = 7681;
@@ -158,6 +159,23 @@ export class DevShareClient {
 
   async listPeers(): Promise<Peer[]> {
     return this.sendRequest('listPeers');
+  }
+
+  // Transfer management methods
+  async getTransferProgress(params: { transferId: string }): Promise<TransferProgress | null> {
+    return this.sendRequest('getTransferProgress', params);
+  }
+
+  async cancelTransfer(params: { transferId: string }): Promise<{ cancelled: boolean }> {
+    return this.sendRequest('cancelTransfer', params);
+  }
+
+  async addManualPeer(params: { address: string; port: number; name?: string }): Promise<{ added: boolean }> {
+    return this.sendRequest('addManualPeer', params);
+  }
+
+  async discoverPeers(): Promise<Peer[]> {
+    return this.sendRequest('discoverPeers');
   }
 
   disconnect(): void {
